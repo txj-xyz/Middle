@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Middle.app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build (universal)
+        env:
+          UNIVERSAL: "1"
+        run: ./build.sh
+
+      - name: Check the bundle
+        run: |
+          test -x build/Middle.app/Contents/MacOS/Middle
+          lipo -archs build/Middle.app/Contents/MacOS/Middle
+          codesign --verify --strict --verbose=2 build/Middle.app
+          plutil -lint build/Middle.app/Contents/Info.plist
+
+      # ditto preserves the bundle's permissions and metadata; upload-artifact's
+      # own zipping does not, and an app that loses its +x bit will not launch.
+      - name: Package
+        run: ditto -c -k --keepParent build/Middle.app Middle.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Middle-app
+          path: Middle.zip
+          if-no-files-found: error

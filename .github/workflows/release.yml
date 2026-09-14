@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build and release, e.g. 1.2.3"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign and publish
+    runs-on: macos-15
+    env:
+      # Secrets are read into the job's env so that steps can test for their
+      # presence: the secrets context is not available in a step-level `if`.
+      # With none of them set the workflow still publishes, ad-hoc signed.
+      CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+      NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+      NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Import signing certificate
+        if: env.CERT_P12 != ''
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          # Put it in the search list so build.sh's find-identity sees it.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
+      - name: Build (universal)
+        env:
+          UNIVERSAL: "1"
+          VERSION: ${{ steps.version.outputs.version }}
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: ./build.sh
+
+      - name: Check the bundle
+        run: |
+          lipo -archs build/Middle.app/Contents/MacOS/Middle
+          codesign --verify --strict --verbose=2 build/Middle.app
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            build/Middle.app/Contents/Info.plist
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ZIP="Middle-$VERSION.zip"
+          ditto -c -k --keepParent build/Middle.app "$ZIP"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$ZIP" | tee "$ZIP.sha256"
+
+      - name: Notarize and staple
+        if: env.NOTARY_APPLE_ID != ''
+        env:
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          xcrun notarytool submit "$ZIP" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --wait
+          # The ticket staples to the bundle, so the zip has to be rebuilt
+          # around the stapled copy for offline Gatekeeper checks to pass.
+          xcrun stapler staple build/Middle.app
+          rm "$ZIP"
+          ditto -c -k --keepParent build/Middle.app "$ZIP"
+          shasum -a 256 "$ZIP" > "$ZIP.sha256"
+          spctl --assess --type execute --verbose=2 build/Middle.app
+
+      - name: Release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          {
+            echo "Requires macOS 13 or later. Universal (Apple silicon + Intel)."
+            echo
+            echo "Grant **Accessibility** and **Input Monitoring** in System"
+            echo "Settings ▸ Privacy & Security on first launch — Middle needs both."
+            if [ -z "$NOTARY_APPLE_ID" ]; then
+              echo
+              echo "This build is not notarised, so Gatekeeper will refuse to open it"
+              echo "after download. Clear the quarantine flag first:"
+              echo
+              echo '```sh'
+              echo "xattr -dr com.apple.quarantine /Applications/Middle.app"
+              echo '```'
+            fi
+            echo
+            echo "\`\`\`"
+            cat "$ZIP.sha256"
+            echo "\`\`\`"
+          } > notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+            --title "Middle $TAG" \
+            --notes-file notes.md \
+            --generate-notes
