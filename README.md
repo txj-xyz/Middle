@@ -1,8 +1,10 @@
 # Middle
 
 Middle mouse button for the MacBook trackpad — click, and press-and-hold to drag.
-macOS has no built-in gesture for it, so this reads raw finger contacts from the
-trackpad and synthesises the button itself.
+macOS has no built-in gesture for it, so Middle reads raw finger contacts from
+the trackpad and synthesises the button itself.
+
+It runs as a menu bar item with no Dock icon (`LSUIElement`), on macOS 13 or later.
 
 ## Build
 
@@ -11,52 +13,14 @@ trackpad and synthesises the button itself.
 open build/Middle.app
 ```
 
-On first launch macOS will ask for two permissions. Both are required:
+On first launch macOS asks for two permissions. Both are required, and the menu
+bar item shows which one it is still waiting for:
 
 - **Accessibility** — create an event tap and post mouse events.
 - **Input Monitoring** — read the raw trackpad contact stream.
 
-Grant them in System Settings ▸ Privacy & Security, then the app picks them up
-within a couple of seconds; no relaunch needed. The menu bar item shows what it
-is waiting for.
-
-## Releases
-
-`.github/workflows/ci.yml` builds a universal `Middle.app` on every push and pull
-request and attaches it to the run as an artifact. `.github/workflows/release.yml`
-does the same on a `v*` tag, then publishes the zip to GitHub Releases:
-
-```sh
-git tag v1.2.3 && git push origin v1.2.3
-```
-
-The tag is the version — `v1.2.3` is stamped into `CFBundleShortVersionString`,
-so nothing in `Info.plist` has to be edited by hand.
-
-Both workflows run `build.sh`, which takes `UNIVERSAL=1`, `VERSION=` and
-`CODESIGN_IDENTITY=` from the environment so the CI path and the local path stay
-the same script.
-
-### Signing a release
-
-With no secrets configured the released app is ad-hoc signed, which is enough to
-run but not enough for Gatekeeper: anyone who downloads it has to clear the
-quarantine flag by hand, and the release notes say so. Setting these repository
-secrets gets a Developer ID signature and a notarised, stapled bundle instead —
-and, because the grants follow the signature, an app that keeps its Accessibility
-and Input Monitoring permissions across updates.
-
-| Secret | |
-| --- | --- |
-| `MACOS_CERT_P12` | Developer ID Application certificate and key, exported as .p12, base64-encoded |
-| `MACOS_CERT_PASSWORD` | Password used for that export |
-| `MACOS_SIGN_IDENTITY` | Identity to sign with, e.g. `Developer ID Application: Your Name (TEAMID)` |
-| `NOTARY_APPLE_ID` | Apple ID for notarisation |
-| `NOTARY_TEAM_ID` | Ten-character team ID |
-| `NOTARY_PASSWORD` | App-specific password, from appleid.apple.com |
-
-The certificate is the first three; notarisation is the last three. Either half
-works on its own, and the workflow skips whichever it has no secrets for.
+Grant them in System Settings ▸ Privacy & Security; the app picks them up within
+a couple of seconds, no relaunch needed.
 
 ## Gestures
 
@@ -71,108 +35,57 @@ Pick one in the menu bar or in Settings.
 Dragging is continuous: the button stays down as long as the gesture is held and
 releases when you let go.
 
-### Multi-finger tap, in detail
-
-Placing N fingers on the pad starts a candidate gesture that resolves three ways:
-
-- lift quickly and still → **middle click**
-- hold still past *Hold to start dragging after* → **button presses and holds**,
-  and the fingers then drive the pointer until they lift
-- move before either of those → **nothing happens**, and the swipe goes through
-  to Mission Control as usual
-
-The timings are adjustable in Settings if swipes and taps are getting confused.
-
-## Conflicts with built-in gestures
-
-Mission Control and full-screen app switching are recognised inside WindowServer,
-straight from the multitouch stream. A diagnostic run confirmed this: the gesture
-produces no swipe event (type 31) anywhere in the session event stream, so there
-is nothing an app can intercept at the obvious place. Middle works around it on
-two levels.
-
-**Blocking, which takes effect immediately.** While one of our gestures is
-actually in progress, Middle withholds the gesture event stream (types 18, 19,
-20, 29, 30, 31, 32) from everything downstream. That is enough to stop Mission
-Control claiming the fingers, and it is scoped to the gesture, so pinch, rotate
-and everything else behave normally the rest of the time. This is the mechanism
-that makes three-finger drag usable.
-
-A gesture arms only after the finger count has held for two consecutive frames,
-and an aborted sequence stays aborted until every finger lifts. Fingers never
-land together, so without both of those a four-finger swipe — which passes
-through a three-finger frame on its way down — gets claimed and blocked.
-
-**Relocating, which takes effect at your next login.** Middle also moves the
-competing settings onto the finger count it is not using, so three-finger mode
-leaves Mission Control and full-screen app switching on four fingers:
-
-| While Middle runs (3-finger mode) | |
-| --- | --- |
-| Three-finger swipe up / left / right | off — Middle's |
-| Four-finger swipe up / left / right | on — Mission Control, app switching |
-| Three-finger tap and three-finger drag | off (tap gesture only) |
-
-Selecting a four-finger gesture relocates in the other direction, and the
-bottom-centre click zone relocates nothing at all. A gesture you had already
-switched off stays off — Middle relocates what exists and never adds a gesture
-you did not have.
-
-Both levels are driven by the single *Move Mission Control and app switching to
-four fingers* switch in Settings. The three mechanisms behind it
-(`suppressSystemGestures`, `manageSystemGestures`, `relocateSystemGestures`) stay
-individually settable with `defaults write com.joeyfinelli.middle …` for
-debugging.
-
-Everything is restored on quit. The previous values — including "this key did not
-exist" — are stashed in Middle's own preferences before anything is written, and
-flushed to disk immediately, so a crash or a `kill -9` is recovered on the next
-launch rather than leaving your trackpad changed. Signal handlers cover `kill`,
-and the settings are also handed back whenever you switch Middle off or pick a
-non-conflicting gesture.
-
-These preference writes are exactly what the System Settings ▸ Trackpad ▸ More
-Gestures checkboxes write — there is no separate API for them. What System
-Settings has and we do not is whatever makes WindowServer re-read them without a
-login; restarting the Dock does not do it, because the Dock is not the process
-deciding. Hence the two-level approach: blocking covers this session, relocating
-makes the settings correct from your next login onward. Restarting the Dock on
-each change is therefore off, and no longer offered in the UI; it survives as
-`defaults write com.joeyfinelli.middle restartDockOnChange -bool true`.
-
-### Diagnostics
-
-    Middle --diagnose            # print live trackpad contacts for 8s
-    Middle --diagnose-conflict   # log event types and input notifications for 45s
-
-Both are read-only; the conflict tap is listen-only and excludes keyboard events
-from its mask entirely.
-
-## Tuning
-
-Settings has a live view of the trackpad surface showing each contact, which is
-the easy way to size the bottom-centre zone and to confirm the trackpad is being
-read at all. `Middle --diagnose` prints the same data to a terminal for eight
-seconds.
-
-*Drag speed* is how many pixels a full-width finger sweep moves the pointer, for
-the gestures where we drive the cursor ourselves.
-
 ## How it works
 
-The awkward part of a synthetic middle button is motion. Posting an
-`otherMouseDown` without a matching up does not tell macOS a button is held, so
-it keeps emitting plain `mouseMoved` events and apps that listen for middle-drag
-(Blender, CAD tools, Figma, terminal autoscroll) see nothing. Every movement
-during a hold therefore has to reach the system as `otherMouseDragged`, by one
-of two paths:
+Three stages, wired together in `AppDelegate`:
+
+```
+trackpad → MultitouchReader → GestureEngine → MiddleButton → macOS
+              (raw frames)     (decides)      (posts events)
+                                  ↑
+                          EventTapController
+                        (clicks and pointer motion)
+```
+
+**1. Read the trackpad.** `MultitouchReader` gets the finger contacts that macOS
+does not otherwise expose. They come from MultitouchSupport, a private
+framework, so it is resolved at runtime with `dlopen`/`dlsym` rather than linked
+— if a future macOS drops it, the app says so in the menu bar instead of failing
+to launch. Each frame (position, count, timing) becomes a `TouchFrame`, delivered
+on the framework's own thread.
+
+**2. Decide.** `GestureEngine` is the only place that decides to press or
+release. For the default tap gesture, N fingers landing starts a candidate that
+resolves three ways:
+
+- lift quickly and still → **middle click**
+- hold still past *Hold to start dragging after* → **press and hold**, and the
+  fingers then drive the pointer until they lift
+- move before either → **nothing happens**, and the swipe goes through to
+  Mission Control as usual
+
+Frames arrive on one thread and events on another, so every entry point takes the
+same recursive lock.
+
+**3. Synthesise.** `MiddleButton` posts the actual events. The awkward part is
+motion: posting an `otherMouseDown` without a matching up does not tell macOS a
+button is held, so it keeps emitting plain `mouseMoved` events and apps that
+listen for middle-drag (Blender, CAD tools, Figma, terminal autoscroll) see
+nothing. Every movement during a hold has to reach the system as
+`otherMouseDragged`, by one of two paths:
 
 - **Synthetic** — multi-finger gestures. macOS will not move the pointer while
-  several fingers are planted, so `GestureEngine` integrates the mean per-finger
-  delta, moves the pointer itself, and swallows any motion events the system
-  produces so the two do not fight.
+  several fingers are planted, so the engine integrates the mean per-finger delta
+  and moves the pointer itself, swallowing any motion events the system produces
+  so the two do not fight.
 - **Rewritten** — the single-finger click zone. macOS is already moving the
   pointer, so the event tap rewrites each move into a middle-drag in place.
+
+`EventTapController` owns the `CGEventTap` that claims clicks and rewrites
+motion. It runs on its own thread and run loop, because a tap that misses its
+deadline behind a blocked UI gets disabled by the system. Events Middle creates
+carry a magic stamp so the tap recognises its own output instead of reprocessing
+it.
 
 | File | Role |
 | --- | --- |
@@ -181,19 +94,93 @@ of two paths:
 | `GestureEngine.swift` | Gesture state machine; the only place that decides to press or release |
 | `MiddleButton.swift` | Event synthesis and pointer integration |
 | `EventTapController.swift` | CGEventTap on its own thread: claims clicks, rewrites motion |
+| `SystemGestureCoordinator.swift` | Suppresses and relocates the competing system gestures |
+| `Preferences.swift` | Settings, stored in `com.joeyfinelli.middle` |
 | `StatusItemController.swift` / `SettingsView.swift` | Menu bar and settings UI |
 
-MultitouchSupport is a private framework, so it is resolved at runtime rather
-than linked: if a future macOS drops it, the app reports the problem in the menu
-bar instead of failing to launch. The struct layout it hands back is validated
-per frame, and a mismatch is logged once.
+A middle button stuck down would be miserable, so a watchdog releases the button
+if trackpad frames stop arriving mid-drag.
 
-## Notes
+## Conflicts with built-in gestures
 
-- A middle button stuck down would be miserable, so a watchdog releases the
-  button if trackpad frames stop arriving mid-drag.
-- macOS ties the two permission grants to the app's code signature. `build.sh`
-  uses a real signing identity from your keychain when there is one, so the
-  grants survive rebuilds; with an ad-hoc signature macOS will re-ask after
-  every build.
-- "Open at Login" in the menu registers the app with `SMAppService`.
+Mission Control and full-screen app switching are recognised inside WindowServer,
+straight from the multitouch stream — they produce no swipe event for an app to
+intercept. Middle works around that on two levels, both driven by the single
+*Move Mission Control and app switching to four fingers* switch in Settings.
+
+**Blocking** takes effect immediately: while one of our gestures is in progress,
+Middle withholds the gesture event stream from everything downstream. It is
+scoped to the gesture, so pinch and rotate behave normally the rest of the time.
+A gesture arms only after the finger count has held for two consecutive frames,
+so a four-finger swipe is not claimed on its way through a three-finger frame.
+
+**Relocating** takes effect at your next login: Middle moves the competing
+settings onto the finger count it is not using, so three-finger mode leaves
+Mission Control and app switching on four fingers. These are the same preferences
+the System Settings ▸ Trackpad checkboxes write, and WindowServer only re-reads
+them at login — hence the two levels.
+
+Everything is restored on quit, on switching Middle off, and on picking a
+non-conflicting gesture. The previous values are stashed and flushed to disk
+before anything is written, so a crash or a `kill -9` is recovered on the next
+launch rather than leaving your trackpad changed.
+
+## Settings and diagnostics
+
+Settings has a live view of the trackpad surface showing each contact, which is
+the easy way to size the bottom-centre zone and to confirm the trackpad is being
+read at all. Gesture timings and *Drag speed* — how far a full-width finger sweep
+moves the pointer — are adjustable there too. "Open at Login" registers the app
+with `SMAppService`.
+
+    Middle --diagnose            # print live trackpad contacts for 8s
+    Middle --diagnose-conflict   # log event types and input notifications for 45s
+
+Both are read-only; the conflict tap is listen-only and excludes keyboard events
+from its mask entirely.
+
+A few knobs have no UI and are set with `defaults write com.joeyfinelli.middle …`:
+the three mechanisms behind the single Settings switch (`suppressSystemGestures`,
+`manageSystemGestures`, `relocateSystemGestures`) stay individually settable for
+debugging, and `restartDockOnChange -bool true` restores the Dock restart that is
+otherwise off — it does not make WindowServer re-read the gesture settings, which
+is why it was dropped from the UI.
+
+## Releases
+
+`.github/workflows/ci.yml` builds a universal `Middle.app` on every push and pull
+request. `.github/workflows/release.yml` does the same on a `v*` tag and
+publishes the zip to GitHub Releases:
+
+```sh
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+The tag is the version — `v1.2.3` is stamped into `CFBundleShortVersionString`,
+so nothing in `Info.plist` is edited by hand. Both workflows run `build.sh`,
+which takes `UNIVERSAL=1`, `VERSION=` and `CODESIGN_IDENTITY=` from the
+environment so CI and local builds stay the same script.
+
+### Signing a release
+
+macOS ties the Accessibility and Input Monitoring grants to the app's code
+signature. An ad-hoc signature changes on every build, so the permissions have to
+be re-approved each time; a real Developer ID identity keeps them stable, and
+`build.sh` uses one from your keychain whenever it finds one.
+
+With no secrets configured the released app is ad-hoc signed — it runs, but
+Gatekeeper blocks it on download and the release notes say how to clear the
+quarantine flag. Setting these repository secrets gets a Developer ID signature
+and a notarised, stapled bundle instead:
+
+| Secret | |
+| --- | --- |
+| `MACOS_CERT_P12` | Developer ID Application certificate and key, exported as .p12, base64-encoded |
+| `MACOS_CERT_PASSWORD` | Password used for that export |
+| `MACOS_SIGN_IDENTITY` | Identity to sign with, e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `NOTARY_APPLE_ID` | Apple ID for notarisation |
+| `NOTARY_TEAM_ID` | Ten-character team ID |
+| `NOTARY_PASSWORD` | App-specific password, from appleid.apple.com |
+
+The certificate is the first three, notarisation the last three. Either half
+works on its own, and the workflow skips whichever it has no secrets for.
