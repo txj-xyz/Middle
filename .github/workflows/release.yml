@@ -133,7 +133,17 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           ZIP: ${{ steps.package.outputs.zip }}
         run: |
-          gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
-            --title "Middle $TAG" \
-            --notes-file notes.md \
-            --generate-notes
+          # A release may already exist for the tag — cutting one in the UI
+          # creates the tag, which is what triggers this workflow. Attach the
+          # build to it rather than failing, and leave notes a human wrote alone.
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
+            if [ -z "$(gh release view "$TAG" --json body -q .body)" ]; then
+              gh release edit "$TAG" --notes-file notes.md
+            fi
+          else
+            gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+              --title "Middle $TAG" \
+              --notes-file notes.md \
+              --generate-notes
+          fi
