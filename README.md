@@ -20,6 +20,44 @@ Grant them in System Settings ▸ Privacy & Security, then the app picks them up
 within a couple of seconds; no relaunch needed. The menu bar item shows what it
 is waiting for.
 
+## Releases
+
+`.github/workflows/ci.yml` builds a universal `Middle.app` on every push and pull
+request and attaches it to the run as an artifact. `.github/workflows/release.yml`
+does the same on a `v*` tag, then publishes the zip to GitHub Releases:
+
+```sh
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+The tag is the version — `v1.2.3` is stamped into `CFBundleShortVersionString`,
+so nothing in `Info.plist` has to be edited by hand.
+
+Both workflows run `build.sh`, which takes `UNIVERSAL=1`, `VERSION=` and
+`CODESIGN_IDENTITY=` from the environment so the CI path and the local path stay
+the same script.
+
+### Signing a release
+
+With no secrets configured the released app is ad-hoc signed, which is enough to
+run but not enough for Gatekeeper: anyone who downloads it has to clear the
+quarantine flag by hand, and the release notes say so. Setting these repository
+secrets gets a Developer ID signature and a notarised, stapled bundle instead —
+and, because the grants follow the signature, an app that keeps its Accessibility
+and Input Monitoring permissions across updates.
+
+| Secret | |
+| --- | --- |
+| `MACOS_CERT_P12` | Developer ID Application certificate and key, exported as .p12, base64-encoded |
+| `MACOS_CERT_PASSWORD` | Password used for that export |
+| `MACOS_SIGN_IDENTITY` | Identity to sign with, e.g. `Developer ID Application: Your Name (TEAMID)` |
+| `NOTARY_APPLE_ID` | Apple ID for notarisation |
+| `NOTARY_TEAM_ID` | Ten-character team ID |
+| `NOTARY_PASSWORD` | App-specific password, from appleid.apple.com |
+
+The certificate is the first three; notarisation is the last three. Either half
+works on its own, and the workflow skips whichever it has no secrets for.
+
 ## Gestures
 
 Pick one in the menu bar or in Settings.
