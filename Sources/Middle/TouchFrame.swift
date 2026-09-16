@@ -6,15 +6,30 @@ import Foundation
 struct Finger {
     var id: Int
     var position: CGPoint
+    /// The trackpad's own measure of how much of it the contact covers. A
+    /// fingertip is small and a palm is not, which is what PalmFilter reads.
     var size: Float
+    /// Long axis of the contact ellipse, in millimetres.
+    var majorAxis: Float = 0
 }
 
 /// One frame from the trackpad: every finger currently in contact.
+///
+/// `fingers` is what the gesture engine counts and measures. Contacts that
+/// PalmFilter has ruled out are moved to `palms`, so they take no part in a
+/// gesture but the settings window can still draw them.
 struct TouchFrame {
     var time: CFTimeInterval
     var fingers: [Finger]
+    var palms: [Finger] = []
 
     var count: Int { fingers.count }
+
+    /// Everything the trackpad reported, palms included.
+    var contacts: [Finger] { fingers + palms }
+
+    /// Largest contact in the frame, for calibrating the palm size limit.
+    var largestSize: Float { contacts.map(\.size).max() ?? 0 }
 
     var centroid: CGPoint {
         guard !fingers.isEmpty else { return .zero }

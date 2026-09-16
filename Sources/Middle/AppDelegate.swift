@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var statusItem = StatusItemController()
     private lazy var monitor = TouchMonitor(engine: engine)
     private let systemGestures = SystemGestureCoordinator()
+    private let frontmostApp = FrontmostAppMonitor()
 
     private var settingsWindow: NSWindow?
     private var permissionTimer: Timer?
@@ -29,6 +30,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusItem.onOpenSettings = { [weak self] in self?.showSettings() }
+        statusItem.frontmostApp = { [weak self] in self?.frontmostApp.frontmost }
+
+        frontmostApp.onChange = { [weak self] _ in self?.applyIgnoreList() }
+        frontmostApp.start()
+        applyIgnoreList()
 
         NotificationCenter.default.addObserver(
             self, selector: #selector(preferencesChanged),
@@ -103,6 +109,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func preferencesChanged() {
         engine.update(config: Preferences.shared.config)
         systemGestures.apply(for: Preferences.shared.config, prefs: Preferences.shared)
+        applyIgnoreList()
+        statusItem.refresh()
+    }
+
+    /// Suspend or resume the engine for whatever is frontmost now. Called both
+    /// when the frontmost app changes and when the list itself does, since
+    /// either can change the answer for the app in front.
+    private func applyIgnoreList() {
+        let app = frontmostApp.frontmost
+        let ignored = Preferences.shared.isIgnored(app?.bundleID)
+        engine.setSuspended(ignored)
+        statusItem.pausedIn = ignored ? app?.name : nil
         statusItem.refresh()
     }
 
@@ -113,11 +131,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let view = SettingsView(prefs: Preferences.shared, monitor: monitor,
                                     systemGestures: systemGestures)
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 420, height: 620),
-                styleMask: [.titled, .closable, .miniaturizable],
+                contentRect: NSRect(x: 0, y: 0, width: 420, height: 640),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
             window.title = "Middle"
             window.contentView = NSHostingView(rootView: view)
+            // The settings content is a fixed-width column that now scrolls, so
+            // let the window grow taller but not wider.
+            window.contentMinSize = NSSize(width: 420, height: 360)
+            window.contentMaxSize = NSSize(width: 420, height: 2000)
             window.isReleasedWhenClosed = false
             window.center()
             settingsWindow = window

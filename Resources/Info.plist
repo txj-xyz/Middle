@@ -8,6 +8,8 @@
 	<string>Middle</string>
 	<key>CFBundleExecutable</key>
 	<string>Middle</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.joeyfinelli.middle</string>
 	<key>CFBundleInfoDictionaryVersion</key>

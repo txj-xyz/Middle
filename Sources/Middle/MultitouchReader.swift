@@ -167,7 +167,8 @@ final class MultitouchReader {
                     id: Int(t.identifier),
                     position: CGPoint(x: CGFloat(t.normalized.position.x),
                                       y: CGFloat(t.normalized.position.y)),
-                    size: t.size))
+                    size: t.size,
+                    majorAxis: t.majorAxis))
             }
         }
         if suspect && !didWarnAboutLayout {
