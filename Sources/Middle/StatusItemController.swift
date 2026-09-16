@@ -10,6 +10,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     var onOpenSettings: (() -> Void)?
     var statusMessage: String?
+    /// Name of the app Middle is currently standing down in, if any.
+    var pausedIn: String?
+    /// The app in front, so the menu can offer to ignore it. Middle itself is
+    /// frontmost while the menu is open, hence asking rather than looking.
+    var frontmostApp: (() -> FrontmostAppMonitor.App?)?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -32,19 +37,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     private func updateIcon() {
         guard let button = statusItem.button else { return }
-        let name: String
-        if !prefs.enabled || statusMessage != nil {
-            name = "computermouse"
-        } else if isEngaged {
-            name = "computermouse.fill"
-        } else {
-            name = "computermouse"
-        }
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Middle")
-        image?.isTemplate = true
-        button.image = image
-        button.appearsDisabled = !prefs.enabled || statusMessage != nil
-        button.toolTip = statusMessage ?? (prefs.enabled ? "Middle click: \(prefs.gesture.title)" : "Middle (off)")
+        let live = prefs.enabled && statusMessage == nil && pausedIn == nil
+        button.image = MiddleIcon.statusBarImage(engaged: isEngaged && live)
+        button.appearsDisabled = !live
+        button.toolTip = tooltip
+    }
+
+    private var tooltip: String {
+        if let statusMessage { return statusMessage }
+        guard prefs.enabled else { return "Middle (off)" }
+        if let pausedIn { return "Middle is ignoring \(pausedIn)" }
+        return "Middle click: \(prefs.gesture.title)"
     }
 
     // MARK: - Menu
@@ -92,6 +95,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.addItem(countItem)
         }
 
+        menu.addItem(ignoredAppsItem())
+
         menu.addItem(.separator())
         menu.addItem(action("Settings…", #selector(openSettings), key: ","))
 
@@ -101,6 +106,39 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
         menu.addItem(action("Quit Middle", #selector(quit), key: "q"))
+    }
+
+    /// "Ignored Apps": a one-click toggle for whatever is in front, and the
+    /// current list with a tick each, so removing is one click too.
+    private func ignoredAppsItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Ignored Apps", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        if let front = frontmostApp?() {
+            let ignored = prefs.isIgnored(front.bundleID)
+            let toggle = action(ignored ? "Stop Ignoring \(front.name)" : "Ignore \(front.name)",
+                                #selector(toggleFrontmostIgnored))
+            toggle.state = ignored ? .on : .off
+            submenu.addItem(toggle)
+            submenu.addItem(.separator())
+        }
+
+        if prefs.ignoredApps.isEmpty {
+            let empty = NSMenuItem(title: "No ignored apps", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            submenu.addItem(empty)
+        } else {
+            for app in prefs.ignoredApps {
+                let entry = action(app.name, #selector(removeIgnoredApp(_:)))
+                entry.representedObject = app.bundleID
+                entry.state = .on
+                entry.toolTip = "Middle stands down while \(app.name) is in front. Click to remove."
+                submenu.addItem(entry)
+            }
+        }
+
+        item.submenu = submenu
+        return item
     }
 
     private func action(_ title: String, _ selector: Selector, key: String = "") -> NSMenuItem {
@@ -123,6 +161,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func selectFingerCount(_ sender: NSMenuItem) {
         prefs.fingerCount = sender.tag
+    }
+
+    @objc private func toggleFrontmostIgnored() {
+        guard let front = frontmostApp?() else { return }
+        if prefs.isIgnored(front.bundleID) {
+            prefs.stopIgnoring(bundleIDs: [front.bundleID])
+        } else {
+            prefs.ignore(IgnoredApp(bundleID: front.bundleID, name: front.name))
+        }
+    }
+
+    @objc private func removeIgnoredApp(_ sender: NSMenuItem) {
+        guard let bundleID = sender.representedObject as? String else { return }
+        prefs.stopIgnoring(bundleIDs: [bundleID])
     }
 
     @objc private func openSettings() {

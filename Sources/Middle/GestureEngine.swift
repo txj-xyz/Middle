@@ -28,6 +28,9 @@ final class GestureEngine {
     private let lock = NSRecursiveLock()
     private let button = MiddleButton()
     private var config = Config()
+    private var palmFilter = PalmFilter()
+    /// Set while the frontmost app is one the user has told Middle to ignore.
+    private var suspended = false
 
     private var lastFrame = TouchFrame.empty
     private var latestFrame = TouchFrame.empty
@@ -60,7 +63,29 @@ final class GestureEngine {
         lock.lock()
         defer { lock.unlock() }
         config = newConfig
-        if !config.enabled && isEngaged { disengage() }
+        palmFilter.enabled = newConfig.palmRejection
+        palmFilter.sizeLimit = newConfig.palmSizeLimit
+        if !isActive && isEngaged { disengage() }
+    }
+
+    /// Stand down — or start again — because the frontmost app changed. A
+    /// gesture in flight is dropped, so switching into an ignored app mid-drag
+    /// cannot leave the button held.
+    func setSuspended(_ newValue: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard suspended != newValue else { return }
+        suspended = newValue
+        if suspended {
+            disengage()
+            resetCandidate()
+        }
+    }
+
+    /// Whether the engine acts on input at all: switched on, and not standing
+    /// down for the frontmost app.
+    private var isActive: Bool {
+        config.enabled && !suspended
     }
 
     var currentConfig: Config {
@@ -78,15 +103,18 @@ final class GestureEngine {
 
     // MARK: - Trackpad input
 
-    func handle(frame: TouchFrame) {
+    func handle(frame raw: TouchFrame) {
         lock.lock()
         defer { lock.unlock() }
 
+        // Everything below counts fingers, so palms come out of the frame
+        // first — they stay in `palms` for the settings window to draw.
+        let frame = palmFilter.apply(to: raw)
         latestFrame = frame
         lastFrameTime = frame.time
         defer { lastFrame = frame }
 
-        guard config.enabled else {
+        guard isActive else {
             if isEngaged { disengage() }
             return
         }
@@ -127,6 +155,16 @@ final class GestureEngine {
                 // otherwise lifting one finger from a four-finger swipe would
                 // arm a three-finger candidate in the middle of that swipe.
                 guard !candidateAborted, lastFrame.count == config.fingerCount else { return }
+                // A hand that has just been typing is usually resting, not
+                // gesturing. Fingers that land inside that window are aborted
+                // rather than merely delayed, so a hand left on the pad stays
+                // ignored until it lifts instead of arming the instant the
+                // window expires. Only arming is guarded: a gesture already
+                // under way is the user's, and a physical click is deliberate.
+                guard !typingIsRecent else {
+                    candidateAborted = true
+                    return
+                }
                 candidateStart = frame.time
                 candidateOrigin = frame.centroid
                 candidateMoved = 0
@@ -169,7 +207,9 @@ final class GestureEngine {
         lock.lock()
         defer { lock.unlock() }
 
-        guard config.enabled else { return event }
+        // Pass everything through untouched while standing down, so an ignored
+        // app sees exactly what it would with Middle not running.
+        guard isActive else { return event }
 
         // Mission Control is recognised inside WindowServer, not from any
         // swipe event we could intercept — a diagnostic run saw type 29 and 30
@@ -250,6 +290,14 @@ final class GestureEngine {
         if isEngaged { return true }
         guard candidateStart != nil, !candidateAborted else { return false }
         return latestFrame.count <= config.fingerCount
+    }
+
+    /// Time since the last keystroke, from the system's own event timing —
+    /// nothing about the key itself, and no keyboard tap of our own.
+    private var typingIsRecent: Bool {
+        guard config.typingGuard > 0 else { return false }
+        let since = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+        return since < config.typingGuard
     }
 
     /// Frames only arrive while fingers are on the pad, so a stale frame means

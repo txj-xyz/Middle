@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 
@@ -38,6 +39,21 @@ enum GestureKind: String, CaseIterable, Identifiable {
     }
 }
 
+/// An app Middle stands down in. The name is stored alongside the bundle
+/// identifier so the list still reads sensibly when the app is not installed
+/// any more, or not running.
+struct IgnoredApp: Codable, Identifiable, Hashable {
+    var bundleID: String
+    var name: String
+
+    var id: String { bundleID }
+
+    /// Where the app lives now, for its icon in the settings list.
+    var url: URL? {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+    }
+}
+
 /// User-facing settings, persisted in UserDefaults and mirrored into an
 /// immutable `Config` snapshot that the gesture engine reads under its lock.
 final class Preferences: ObservableObject {
@@ -65,6 +81,19 @@ final class Preferences: ObservableObject {
     /// Move the conflicting swipes to the finger count Middle is not using,
     /// rather than switching them off outright.
     @Published var relocateSystemGestures: Bool { didSet { save(relocateSystemGestures, "relocateSystemGestures") } }
+    /// Drop contacts too big to be a fingertip before counting fingers.
+    @Published var palmRejection: Bool { didSet { save(palmRejection, "palmRejection") } }
+    /// Reported contact size at which a contact counts as a palm. The units are
+    /// the trackpad's own, so Settings shows the live value to calibrate against.
+    @Published var palmSizeLimit: Double { didSet { save(palmSizeLimit, "palmSizeLimit") } }
+    /// Do not start a tap gesture in the moments right after a keystroke, which
+    /// is when a palm is most likely to be resting on the pad.
+    @Published var ignoreAfterTyping: Bool { didSet { save(ignoreAfterTyping, "ignoreAfterTyping") } }
+    @Published var typingDelay: Double { didSet { save(typingDelay, "typingDelay") } }
+    /// Apps Middle stands down in while they are frontmost, sorted by name.
+    /// Stored as JSON rather than as a plain list of identifiers so the names
+    /// survive the app being moved or uninstalled.
+    @Published var ignoredApps: [IgnoredApp] { didSet { saveIgnoredApps() } }
 
     private let defaults = UserDefaults.standard
 
@@ -84,6 +113,10 @@ final class Preferences: ObservableObject {
             "restartDockOnChange": false,
             "suppressSystemGestures": true,
             "relocateSystemGestures": true,
+            "palmRejection": true,
+            "palmSizeLimit": 3.5,
+            "ignoreAfterTyping": true,
+            "typingDelay": 0.4,
         ])
         enabled = defaults.bool(forKey: "enabled")
         gesture = GestureKind(rawValue: defaults.string(forKey: "gesture") ?? "") ?? .multiFingerTap
@@ -99,11 +132,45 @@ final class Preferences: ObservableObject {
         restartDockOnChange = defaults.bool(forKey: "restartDockOnChange")
         suppressSystemGestures = defaults.bool(forKey: "suppressSystemGestures")
         relocateSystemGestures = defaults.bool(forKey: "relocateSystemGestures")
+        palmRejection = defaults.bool(forKey: "palmRejection")
+        palmSizeLimit = defaults.double(forKey: "palmSizeLimit")
+        ignoreAfterTyping = defaults.bool(forKey: "ignoreAfterTyping")
+        typingDelay = defaults.double(forKey: "typingDelay")
+        ignoredApps = Preferences.decodeIgnoredApps(defaults.data(forKey: "ignoredApps"))
     }
 
     private func save(_ value: Any, _ key: String) {
         defaults.set(value, forKey: key)
         NotificationCenter.default.post(name: .preferencesChanged, object: nil)
+    }
+
+    private func saveIgnoredApps() {
+        defaults.set(try? JSONEncoder().encode(ignoredApps), forKey: "ignoredApps")
+        NotificationCenter.default.post(name: .preferencesChanged, object: nil)
+    }
+
+    private static func decodeIgnoredApps(_ data: Data?) -> [IgnoredApp] {
+        guard let data, let apps = try? JSONDecoder().decode([IgnoredApp].self, from: data) else { return [] }
+        return apps
+    }
+
+    // MARK: - Ignored apps
+
+    func isIgnored(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return ignoredApps.contains { $0.bundleID == bundleID }
+    }
+
+    func ignore(_ app: IgnoredApp) {
+        guard !isIgnored(app.bundleID) else { return }
+        ignoredApps = (ignoredApps + [app]).sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+    }
+
+    func stopIgnoring(bundleIDs: Set<String>) {
+        guard ignoredApps.contains(where: { bundleIDs.contains($0.bundleID) }) else { return }
+        ignoredApps.removeAll { bundleIDs.contains($0.bundleID) }
     }
 
     /// The single switch the settings window shows. The three mechanisms below
@@ -128,14 +195,19 @@ final class Preferences: ObservableObject {
                pointerSpeed: pointerSpeed,
                zoneX: min(zoneXMin, zoneXMax)...max(zoneXMin, zoneXMax),
                zoneYMax: zoneYMax,
-               suppressSystemGestures: suppressSystemGestures)
+               suppressSystemGestures: suppressSystemGestures,
+               palmRejection: palmRejection,
+               palmSizeLimit: palmSizeLimit,
+               typingGuard: ignoreAfterTyping ? typingDelay : 0)
     }
 
     func resetToDefaults() {
         for key in ["enabled", "gesture", "fingerCount", "tapTimeout", "holdDelay",
                     "tapSlop", "pointerSpeed", "zoneXMin", "zoneXMax", "zoneYMax",
                     "manageSystemGestures", "restartDockOnChange",
-                    "suppressSystemGestures", "relocateSystemGestures"] {
+                    "suppressSystemGestures", "relocateSystemGestures",
+                    "palmRejection", "palmSizeLimit", "ignoreAfterTyping", "typingDelay",
+                    "ignoredApps"] {
             defaults.removeObject(forKey: key)
         }
         enabled = defaults.bool(forKey: "enabled")
@@ -152,6 +224,11 @@ final class Preferences: ObservableObject {
         restartDockOnChange = defaults.bool(forKey: "restartDockOnChange")
         suppressSystemGestures = defaults.bool(forKey: "suppressSystemGestures")
         relocateSystemGestures = defaults.bool(forKey: "relocateSystemGestures")
+        palmRejection = defaults.bool(forKey: "palmRejection")
+        palmSizeLimit = defaults.double(forKey: "palmSizeLimit")
+        ignoreAfterTyping = defaults.bool(forKey: "ignoreAfterTyping")
+        typingDelay = defaults.double(forKey: "typingDelay")
+        ignoredApps = []
     }
 }
 
@@ -167,6 +244,11 @@ struct Config {
     var zoneX: ClosedRange<Double> = 0.34...0.66
     var zoneYMax = 0.25
     var suppressSystemGestures = true
+    var palmRejection = true
+    var palmSizeLimit = 3.5
+    /// Seconds after the last keystroke during which a tap gesture will not
+    /// arm. Zero switches the guard off.
+    var typingGuard = 0.4
 }
 
 extension Notification.Name {

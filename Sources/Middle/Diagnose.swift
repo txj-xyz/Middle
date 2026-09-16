@@ -10,13 +10,18 @@ enum Diagnose {
         let reader = MultitouchReader()
         var frames = 0
         var maxFingers = 0
+        var largest: Float = 0
 
         reader.onFrame = { frame in
             frames += 1
             maxFingers = max(maxFingers, frame.count)
+            largest = max(largest, frame.largestSize)
             guard frame.count > 0 else { return }
+            // size and axis are what the palm size limit in Settings compares
+            // against, so print both: rest a palm and read the numbers.
             let described = frame.fingers
-                .map { String(format: "#%d (%.2f, %.2f) size %.2f", $0.id, $0.position.x, $0.position.y, $0.size) }
+                .map { String(format: "#%d (%.2f, %.2f) size %.2f axis %.1fmm",
+                              $0.id, $0.position.x, $0.position.y, $0.size, $0.majorAxis) }
                 .joined(separator: "  ")
             print(String(format: "%2d finger(s): %@", frame.count, described))
         }
@@ -31,7 +36,8 @@ enum Diagnose {
         print("Reading trackpad for \(Int(seconds))s — move some fingers around.")
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))
         reader.stop()
-        print("\nSaw \(frames) frames, up to \(maxFingers) simultaneous fingers.")
+        print(String(format: "\nSaw %d frames, up to %d simultaneous fingers, largest contact %.2f.",
+                     frames, maxFingers, largest))
         if frames == 0 {
             print("No frames at all. Grant Input Monitoring to this terminal (or run the app bundle) and retry.")
             exit(1)

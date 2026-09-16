@@ -7,6 +7,7 @@ let package = Package(
     targets: [
         .target(name: "CMultitouch"),
         .executableTarget(name: "Middle", dependencies: ["CMultitouch"]),
+        .testTarget(name: "MiddleTests", dependencies: ["Middle"]),
     ],
     swiftLanguageVersions: [.v5]
 )
